@@ -36,6 +36,9 @@ struct mpu6050_data
   float x;
   float y;
   float z;
+  float gx;
+  float gy;
+  float gz;
 };
 
 
@@ -256,6 +259,9 @@ xSemaphoreTake(i2c_mutex, portMAX_DELAY);
     data.x = a.acceleration.x;
     data.y = a.acceleration.y;
     data.z = a.acceleration.z;
+    data.gx = g.gyro.x;
+    data.gy = g.gyro.y;
+    data.gz = g.gyro.z;
     xQueueOverwrite(mpu6050_queue, &data);
     xSemaphoreGive(i2c_mutex);
     vTaskDelay(10);
@@ -348,6 +354,9 @@ void Send_data(void *pvParameters)
     sensor_data[counter].ax = data.x;
     sensor_data[counter].ay = data.y;
     sensor_data[counter].az = data.z;
+    sensor_data[counter].gx = data.gx;
+    sensor_data[counter].gy = data.gy;
+    sensor_data[counter].gz = data.gz;
   
     
 #endif
