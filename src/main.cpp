@@ -13,7 +13,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 
-#define READINGS_NUM 6
+#define READINGS_NUM 4
 
 #define MPU6050_SENSOR 1
 #define ULTRASSONIC_SENSOR 1
@@ -47,6 +47,7 @@ struct mpu6050_data
 #if ULTRASSONIC_SENSOR
 QueueHandle_t ultrassound_queue;
 QueueHandle_t ultrassonic_queue_signal_enable;
+QueueHandle_t ultrassonic_timestamp_queue;
 #endif
 
 #if MPU6050_SENSOR
@@ -72,14 +73,14 @@ int comparar(const void *a, const void *b);
 
 typedef struct struct_message
 {
-  float ax = 0;
-  float ay = 0;
-  float az = 0;
-  float gx = 0;
-  float gy = 0;
-  float gz = 0;
-  int distance = 0;
-  int tempo = 0;
+  volatile float ax = 0;
+  volatile float ay = 0;
+  volatile float az = 0;
+  volatile float gx = 0;
+  volatile float gy = 0;
+  volatile float gz = 0;
+  volatile int distance = 0;
+  volatile int tempo = 0;
 } struct_message;
 
 
@@ -89,12 +90,19 @@ typedef struct struct_message
 
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len);
 
+int comparar(const void *a, const void *b); 
+float calcularMediana(float arr[], int tamanho);
+
 
 void MPU6050_task(void *pvParameters);
 void ultrassonic_sensor_task(void *pvParameters);
 void Send_data(void *pvParameters);
 void ADXL345_task(void *pvParameters);
 void IMU_Processing_task(void *pvParameters);
+void IMU_Filtering_task(void *pvParameters);
+
+
+
 
 void setup() {
     Serial.begin(115200);
@@ -131,6 +139,7 @@ void setup() {
     }
     
     #if ULTRASSONIC_SENSOR
+    ultrassonic_timestamp_queue = xQueueCreate(1, sizeof(int));
     ultrassonic_queue_signal_enable = xQueueCreate(1, sizeof(int)); // Length 1
     if (ultrassonic_queue_signal_enable == NULL) {
         Serial.println("Ultrasonic queue creation failed");
@@ -166,7 +175,7 @@ void setup() {
         Serial.println("I2C Mutex Created");
     }
 
-    imu_processing_queue = xQueueCreate(1, sizeof(float));
+    imu_processing_queue = xQueueCreate(1, sizeof(mpu6050_data));
     if (imu_processing_queue == NULL) {
         Serial.println("IMU processing queue creation failed");
     } else {
@@ -187,7 +196,7 @@ void setup() {
     } else {
         Serial.println("MPU6050 Data Queue Created");
     }
-    xTaskCreate(MPU6050_task, "MPU6050_task", 2048, NULL, 2, NULL);
+    xTaskCreate(MPU6050_task, "MPU6050_task", 2048, NULL, 4, NULL);
     #endif
 
     #if ULTRASSONIC_SENSOR
@@ -197,7 +206,7 @@ void setup() {
     } else {
         Serial.println("Ultrasonic Queue Created");
     }
-    xTaskCreate(ultrassonic_sensor_task, "ultrassonic_sensor_task", 2048, NULL, 3, NULL);
+    xTaskCreate(ultrassonic_sensor_task, "ultrassonic_sensor_task", 2048, NULL, 4, NULL);
     #endif
     
     #if ADXL345_SENSOR
@@ -207,7 +216,7 @@ void setup() {
     } else {
         Serial.println("ADXL345 Queue Created");
     }
-    xTaskCreate(ADXL345_task, "ADXL345_task", 2048, NULL, 2, NULL);
+    xTaskCreate(ADXL345_task, "ADXL345_task", 2048, NULL, 4, NULL);
     #endif
     
     // Add peer
@@ -222,6 +231,7 @@ void setup() {
         Serial.println("Peer Added Successfully");
     }
     xTaskCreate(Send_data, "Send_data", 2048, NULL, 2, NULL);
+    xTaskCreate(IMU_Filtering_task, "IMU_FILETRING", 2048, NULL, 3, NULL);
 }
 
 void loop()
@@ -279,9 +289,14 @@ void ultrassonic_sensor_task(void *pvParameters)
   unsigned char data[4];
   int distance = 0;
   int status = 0;
+  int timestamp = 0;
+  TickType_t xLastWakeTime;
   while (1)
   {
+    unsigned long prev_time = millis();
+xLastWakeTime = xTaskGetTickCount();
 xQueueReceive(ultrassonic_queue_signal_enable, &status, pdMS_TO_TICKS(0));
+timestamp = millis();
 if(status == 1){
     do
     {
@@ -291,6 +306,7 @@ if(status == 1){
       }
     } while (mySerial.read() == 0xff);
     mySerial.flush();
+    
     if (data[0] == 0xff)
     {
       int sum;
@@ -308,11 +324,15 @@ if(status == 1){
         }
       }
     }
-
+    xQueueOverwrite(ultrassonic_timestamp_queue, &timestamp);
     xQueueOverwrite(ultrassound_queue, &distance);
-    //vTaskDelay(150);
+    
 }
-    vTaskDelay(150);
+    //vTaskDelay(150);
+
+    vTaskDelayUntil(&xLastWakeTime, 100);
+    
+    //Serial.println(millis() - prev_time);
   }
 #else
   vTaskDelete(NULL);
@@ -321,7 +341,7 @@ if(status == 1){
 
 void Send_data(void *pvParameters)
 {
-  unsigned long timestamp = 0;
+  int timestamp = 0;
 
   int status = 0;
   struct_message sensor_data[READINGS_NUM];
@@ -333,9 +353,9 @@ void Send_data(void *pvParameters)
   int time = 0;
   while (1)
   {
-    xQueueReceive(timestamp_ref, &timestamp, pdMS_TO_TICKS(0));
+   // xQueueReceive(timestamp_ref, &timestamp, pdMS_TO_TICKS(0));
     #if ULTRASSONIC_SENSOR
-    if(xQueueReceive(ultrassound_queue, &distance, pdMS_TO_TICKS(0)) == pdTRUE)
+    if(xQueueReceive(ultrassound_queue, &distance, portMAX_DELAY) == pdTRUE)
     {
      // Serial.print(distance);
       //Serial.print("\t"); 
@@ -344,20 +364,15 @@ void Send_data(void *pvParameters)
     
 #endif
 #if MPU6050_SENSOR
-    xQueueReceive(mpu6050_queue, &data, portMAX_DELAY);
+    xQueueReceive(imu_processing_queue, &data, portMAX_DELAY);
     
-    //Serial.print(data.x);
-    //Serial.print("\t");
-    //Serial.print(data.y);
-    //Serial.print("\t");
-    //Serial.println(data.z);
+
     sensor_data[counter].ax = data.x;
     sensor_data[counter].ay = data.y;
     sensor_data[counter].az = data.z;
     sensor_data[counter].gx = data.gx;
     sensor_data[counter].gy = data.gy;
     sensor_data[counter].gz = data.gz;
-  
     
 #endif
 #if ADXL345_SENSOR
@@ -372,9 +387,10 @@ void Send_data(void *pvParameters)
     sensor_data[counter].ay = data.y;
     sensor_data[counter].az = data.z;
 #endif
-  time =millis()-_timestamp;
-  //sensor_data[counter].tempo = time;
-  sensor_data[counter].tempo = millis();
+  xQueueReceive(ultrassonic_timestamp_queue, &timestamp, portMAX_DELAY);
+  //Serial.println(timestamp - _timestamp);
+  _timestamp = timestamp;
+  sensor_data[counter].tempo = timestamp;
 
 
   xQueueReceive(send_data_queue, &status, pdMS_TO_TICKS(0));
@@ -416,13 +432,12 @@ void Send_data(void *pvParameters)
       //  Serial.println("Failed to acquire mutex");
     }
   }
-    if(counter < READINGS_NUM - 1){
+    if(counter <= READINGS_NUM - 1){
     counter++;
 } else {
-   // Serial.println("Counter reached maximum limit. Resetting.");
+
     counter = 0;
-   // Serial.print("Status: ");
-   // Serial.println(status);
+
 }
 
     vTaskDelay(10);
@@ -483,7 +498,7 @@ void IMU_Processing_task(void *pvParameters){
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len){
     int status = 0;
     
-    Serial.println("Data received");
+   
     
     // Validate incomingData length
     if (len < sizeof(int)) {
@@ -510,8 +525,8 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len){
         }
     }
     
-    Serial.print("Status received: ");
-    Serial.println(status);
+   // Serial.print("Status received: ");
+   // Serial.println(status);
     
     // Overwrite send_data_queue with error checking
     if (xQueueOverwrite(send_data_queue, &status) != pdTRUE) {
@@ -535,13 +550,62 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len){
         Serial.println("Failed to overwrite adxl345_queue_signal_enable");
     }
     #endif
-    unsigned long time = millis();
-    xQueueOverwrite(timestamp_ref, &time);
+    //unsigned long time = millis();
+    //xQueueOverwrite(timestamp_ref, &time);
+   // Serial.println(time);
     
 }
 
 
+void IMU_Filtering_task(void *pvParameters){
+    struct mpu6050_data data[READINGS_NUM];
+    struct mpu6050_data received_data;
 
+    
+    int pointer = 0;
+    while(1){
+        
+        if(pointer >= READINGS_NUM-1){
+            pointer = 0;
+        }
+        xQueueReceive(mpu6050_queue, &received_data, portMAX_DELAY);
+        data[pointer] = received_data;
+        pointer++;
+        float x_values[READINGS_NUM];
+        float y_values[READINGS_NUM];
+        float z_values[READINGS_NUM];
+        float gx_values[READINGS_NUM];
+        float gy_values[READINGS_NUM];
+        float gz_values[READINGS_NUM];
+
+        for (int i = 0; i < READINGS_NUM; i++) {
+            x_values[i] = data[i].x;
+            y_values[i] = data[i].y;
+            z_values[i] = data[i].z;
+            gx_values[i] = data[i].gx;
+            gy_values[i] = data[i].gy;
+            gz_values[i] = data[i].gz;
+        }
+
+        float median_x = calcularMediana(x_values, READINGS_NUM);
+        float median_y = calcularMediana(y_values, READINGS_NUM);
+        float median_z = calcularMediana(z_values, READINGS_NUM);
+        float median_gx = calcularMediana(gx_values, READINGS_NUM);
+        float median_gy = calcularMediana(gy_values, READINGS_NUM);
+        float median_gz = calcularMediana(gz_values, READINGS_NUM);
+
+        struct mpu6050_data filtered_data;
+        filtered_data.x = median_y;
+        filtered_data.y = median_y;
+        filtered_data.z = median_z;
+        filtered_data.gx = median_gx;
+        filtered_data.gy = median_gy;
+        filtered_data.gz = median_gz;
+
+        xQueueOverwrite(imu_processing_queue, &filtered_data);
+        vTaskDelay(10);
+    }
+}
 
 int comparar(const void *a, const void *b) {
     if (*(float*)a < *(float*)b) return -1;
