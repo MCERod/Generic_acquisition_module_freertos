@@ -296,6 +296,7 @@ void ultrassonic_sensor_task(void *pvParameters)
     unsigned long prev_time = millis();
 xLastWakeTime = xTaskGetTickCount();
 xQueueReceive(ultrassonic_queue_signal_enable, &status, pdMS_TO_TICKS(0));
+//Serial.println(millis() - timestamp);
 timestamp = millis();
 if(status == 1){
     do
@@ -390,6 +391,7 @@ void Send_data(void *pvParameters)
   xQueueReceive(ultrassonic_timestamp_queue, &timestamp, portMAX_DELAY);
   //Serial.println(timestamp - _timestamp);
   _timestamp = timestamp;
+  Serial.println(timestamp);
   sensor_data[counter].tempo = timestamp;
 
 
@@ -432,15 +434,13 @@ void Send_data(void *pvParameters)
       //  Serial.println("Failed to acquire mutex");
     }
   }
-    if(counter <= READINGS_NUM - 1){
-    counter++;
-} else {
+    if(counter < READINGS_NUM - 1){
+      counter++;
+    } else {
+      counter = 0;
+    }
 
-    counter = 0;
-
-}
-
-    vTaskDelay(10);
+    vTaskDelay(1);
   }
   
 }
